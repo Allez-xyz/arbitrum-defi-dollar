@@ -6,6 +6,9 @@ import clickhouse_connect
 import modal
 import logging
 import json
+import time
+import requests
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,8 +31,8 @@ app = modal.App(name="fetch_fluid_defidollar", image=custom_image)
         modal.Secret.from_name("RPC_ENDPOINTS")
     ],
     schedule=modal.schedule.Cron("25 */6 * * *"),
-    mounts=[modal.Mount.from_local_file("abis/fluid/fluid_lending.json", remote_path="/root/abis/fluid/fluid_lending.json"),
-            modal.Mount.from_local_file("abis/fluid/fluid_vault.json", remote_path="/root/abis/fluid/fluid_vault.json")],
+    mounts=[modal.Mount.from_local_file("datacapture/abis/fluid/fluid_lending.json", remote_path="/root/abis/fluid/fluid_lending.json"),
+            modal.Mount.from_local_file("datacapture/abis/fluid/fluid_vault.json", remote_path="/root/abis/fluid/fluid_vault.json")]
     
 )
 def main():
@@ -67,8 +70,8 @@ def main():
         modal.Secret.from_name("clickhouse_nuevo"),
         modal.Secret.from_name("RPC_ENDPOINTS")
     ],
-    mounts=[modal.Mount.from_local_file("abis/fluid/fluid_lending.json", remote_path="/root/abis/fluid/fluid_lending.json"),
-            modal.Mount.from_local_file("abis/fluid/fluid_vault.json", remote_path="/root/abis/fluid/fluid_vault.json")]
+    mounts=[modal.Mount.from_local_file("datacapture/abis/fluid/fluid_lending.json", remote_path="/root/abis/fluid/fluid_lending.json"),
+            modal.Mount.from_local_file("datacapture/abis/fluid/fluid_vault.json", remote_path="/root/abis/fluid/fluid_vault.json")]
 )
 def query_markets(block):
     block = int(block)
@@ -130,8 +133,8 @@ def query_markets(block):
         modal.Secret.from_name("clickhouse_nuevo"),
         modal.Secret.from_name("RPC_ENDPOINTS")
     ],
-    mounts=[modal.Mount.from_local_file("abis/fluid/fluid_lending.json", remote_path="/root/abis/fluid/fluid_lending.json"),
-            modal.Mount.from_local_file("abis/fluid/fluid_vault.json", remote_path="/root/abis/fluid/fluid_vault.json")]
+    mounts=[modal.Mount.from_local_file("datacapture/abis/fluid/fluid_lending.json", remote_path="/root/abis/fluid/fluid_lending.json"),
+            modal.Mount.from_local_file("datacapture/abis/fluid/fluid_vault.json", remote_path="/root/abis/fluid/fluid_vault.json")]
     )
 def query_and_upload(block):
     block = int(block)
@@ -175,3 +178,37 @@ def query_and_upload(block):
                             ])
 
     logger.info(f'block {block} complete')
+
+@app.function(
+    timeout=60 * 15 * 1,
+    concurrency_limit=1,
+    schedule=modal.Cron("12 * * * *"),
+    secrets=[
+        modal.Secret.from_name("clickhouse_nuevo"),
+    ])
+def query_api():
+
+    clickhouse_client = clickhouse_connect.get_client(
+        host=os.getenv("CLICKHOUSE_HOST"),
+        username=os.getenv("CLICKHOUSE_USER"),
+        password=os.getenv("CLICKHOUSE_PASSWORD"),
+        port=8443,
+    )
+
+
+    now = int(time.time())
+    url = "https://api.fluid.instadapp.io/v2/42161/vaults"
+
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Raises an error for bad status codes
+        data = response.json()       # Assuming the response is in JSON format
+        print(data)
+    except requests.exceptions.RequestException as e:
+        print("An error occurred:", e)
+
+    fluid_api_df = pd.json_normalize(response.json())
+    fluid_api_df.columns = fluid_api_df.columns.str.replace('.', '_', regex=False)
+    fluid_api_df['ingest_timestamp'] = now
+
+    clickhouse_client.insert_df(table='ingest.fluid_defidollar_api',df=fluid_api_df)
